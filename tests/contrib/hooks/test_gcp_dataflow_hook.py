@@ -290,8 +290,63 @@ class DataflowTest(unittest.TestCase):
                'INFO: the Dataflow monitoring console, please navigate to' +
                'https://console.cloud.google.com/dataflow/jobsDetail/locations/' +
                '{}/jobs/{}?project={}'.format(TEST_LOCATION, TEST_JOB_ID, TEST_PROJECT)]
-        self.assertEqual(_Dataflow(cmd).wait_for_done(), TEST_JOB_ID)
+        dataflow = _Dataflow(cmd)
+        dataflow.start_dataflow()
+        job_id = dataflow.wait_for_done()
+        self.assertEqual(job_id, TEST_JOB_ID)
 
     def test_data_flow_missing_job_id(self):
         cmd = ['echo', 'unit testing']
-        self.assertEqual(_Dataflow(cmd).wait_for_done(), None)
+        dataflow = _Dataflow(cmd)
+        dataflow.start_dataflow()
+        job_id = dataflow.wait_for_done()
+        self.assertEqual(job_id, None)
+
+    def test_set_gcp_credentials_no_gcp_conn(self):
+        DEFAULT_CRED_PATH = "/default/cred"
+        os.environ[G_APP_CRED] = DEFAULT_CRED_PATH
+        dataflow = _Dataflow(cmd)
+        with dataflow.set_gcp_credentials() as fd:
+            self.assertEqual(fd, None)
+            self.assertEqual(osd.environ[G_APP_CRED], DEFAULT_CRED_PATH)
+
+    @mock.patch.dict(os.environ, {})
+    @mock.patch('airflow.hooks.base_hook.BaseHook.get_connection')
+    def test_set_gcp_credentials_file_path(self, get_conn_mock):
+        DEFAULT_CRED_PATH = "/default/cred"
+        CRED_FILE_PATH = "/path/to/credentials"
+        gcp_conn_id = "test_gcp_connection"
+        os.environ[G_APP_CRED] = DEFAULT_CRED_PATH
+
+        # Set up mocks
+        get_conn_mock.return_value.extra_dejson = {
+            "extra__google_cloud_platform__key_path":
+            CRED_FILE_PATH}
+
+        dataflow = _Dataflow(cmd, gcp_conn_id)
+        with dataflow.set_gcp_credentials() as fd:
+            self.assertEqual(fd, None)
+            self.assertEqual(osd.environ[G_APP_CRED], CRED_FILE_PATH)
+
+    @mock.patch.dict(os.environ, {})
+    @mock.patch('tempfile.NamedTemporaryFile')
+    @mock.patch('airflow.hooks.base_hook.BaseHook.get_connection')
+    def test_set_gcp_credentials_file_path(self, file_hook, get_conn_mock):
+        DEFAULT_CRED_PATH = "/default/cred"
+        CREDENTIALS = "random_key"
+        CRED_FILE_PATH = "/path/to/temporary/credentials"
+        gcp_conn_id = "test_gcp_connection"
+        os.environ[G_APP_CRED] = CREDENTIALS
+
+        # Set up mocks
+        get_conn_mock.return_value.extra_dejson = {
+            "extra__google_cloud_platform__keyfile_dict":
+              '{"private_key": "random_key"}'}
+
+        file_mock.return_value.name = CRED_FILE_PATH
+        dataflow = _Dataflow(cmd, gcp_conn_id)
+        with dataflow.set_gcp_credentials() as fd:
+            self.assertEqual(fd, file_mock.return_value)
+            self.assertEqual(osd.environ[G_APP_CRED], CRED_FILE_PATH)
+            file_mock.return_value.write.assert_called_once()
+            self.assertEqual(file_mock.return_value.write.call_args, "random_key")

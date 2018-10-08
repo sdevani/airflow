@@ -116,14 +116,69 @@ class _DataflowJob(LoggingMixin):
 
 
 class _Dataflow(LoggingMixin):
-    def __init__(self, cmd):
-        self.log.info("Running command: %s", ' '.join(cmd))
+    def __init__(self, cmd, gcp_conn_id='google_cloud_default'):
+        self.cmd = cmd
+        self.gcp_conn_id = gcp_conn_id
+
+    def start_dataflow(self):
+        self.log.info("Running command: %s", ' '.join(self.cmd))
         self._proc = subprocess.Popen(
-            cmd,
+            self.cmd,
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True)
+
+    def set_gcp_credentials(self):
+        """
+        Sets the environment variable `GOOGLE_APPLICATION_CREDENTIALS` with either:
+
+        - The path to the keyfile from the specified connection id
+        - A generated file's path if the user specified JSON in the connection id. The
+            file should be deleted using context manager.
+
+        The environment variable is used inside the gcloud command to determine correct
+        service account to use.
+        """
+        # If gcp_conn_id is not specified gcloud will use the default
+        # service account credentials.
+        if self.gcp_conn_id:
+            from airflow.hooks.base_hook import BaseHook
+            self.log.info("Connecting to gcp conn id: %s", self.gcp_conn_id)
+            # extras is a deserialized json object
+            extras = BaseHook.get_connection(self.gcp_conn_id).extra_dejson
+        key_path = self._get_field(extras, 'key_path', False)
+        keyfile_json_str = self._get_field(extras, 'keyfile_dict', False)
+
+        if not key_path and not keyfile_json_str:
+            self.log.info('Using gcloud with application default credentials.')
+        elif key_path:
+            os.environ[G_APP_CRED] = key_path
+        else:
+            # Write service account JSON to secure file for gcloud to reference
+            service_key_file = tempfile.NamedTemporaryFile()
+            service_key_file.write(keyfile_json_str)
+
+            os.environ[G_APP_CRED] = service_key_file.name
+            # Return file object to have a pointer to close after use,
+            # thus deleting from file system.
+            return service_key_file
+
+    def _get_field(self, extras, field, default=None):
+        """
+        Fetches a field from extras, and returns it. This is some Airflow
+        magic. The google_cloud_platform hook type adds custom UI elements
+        to the hook page, which allow admins to specify service_account,
+        key_path, etc. They get formatted as shown below.
+        """
+        long_f = 'extra__google_cloud_platform__{}'.format(field)
+        if not extras:
+            return default
+        else if long_f in extras:
+            return extras[long_f]
+        else:
+            self.log.info('Field {} not found in extras.'.format(field))
+            return default
 
     def _line(self, fd):
         if fd == self._proc.stderr.fileno():
@@ -193,7 +248,10 @@ class DataFlowHook(GoogleCloudBaseHook):
     def _start_dataflow(self, variables, name, command_prefix, label_formatter):
         variables = self._set_variables(variables)
         cmd = command_prefix + self._build_cmd(variables, label_formatter)
-        job_id = _Dataflow(cmd).wait_for_done()
+        dataflow = _Dataflow(cmd, self.gcp_conn_id)
+        with dataflow.set_gcp_credentials():
+            dataflow.wait_for_done()
+            job_id = dataflow.wait_for_done()
         _DataflowJob(self.get_conn(), variables['project'], name,
                      variables['region'],
                      self.poll_sleep, job_id).wait_for_done()
